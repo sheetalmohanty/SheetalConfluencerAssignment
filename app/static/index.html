@@ -1,0 +1,263 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Transaction Ledger</title>
+  <style>
+    body { font: 16px system-ui, sans-serif; max-width: 960px; margin: 24px auto; padding: 0 16px; }
+    section { border-top: 1px solid #ccc; margin-top: 24px; padding-top: 8px; }
+    label { display: block; margin: 10px 0; }
+    input, select, button { font: inherit; padding: 5px; max-width: 100%; box-sizing: border-box; }
+    input:not([type="number"]) { width: min(100%, 420px); }
+    button { margin: 4px 4px 4px 0; cursor: pointer; }
+    .table-wrap { overflow-x: auto; }
+    table { border-collapse: collapse; width: 100%; margin: 12px 0; }
+    th, td { border: 1px solid #ccc; padding: 8px; text-align: left; overflow-wrap: anywhere; }
+    pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #f5f5f5; padding: 12px; }
+    [role="status"] { white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>Transaction Ledger</h1>
+  <p>A simple interface for the ledger API. <a href="/docs">API documentation</a></p>
+  <p id="status" role="status" aria-live="polite">Ready.</p>
+
+  <section>
+    <h2>Create account</h2>
+    <form id="create-account">
+      <label>Name <input name="name" required maxlength="200" autocomplete="name"></label>
+      <button>Create account</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Account</h2>
+    <form id="load-account">
+      <label>Account ID
+        <input id="account-id" name="account_id" required placeholder="Account UUID" list="demo-accounts">
+      </label>
+      <datalist id="demo-accounts">
+        <option value="00000000-0000-4000-8000-000000000001">Alice Demo</option>
+        <option value="00000000-0000-4000-8000-000000000002">Bob Demo</option>
+        <option value="00000000-0000-4000-8000-000000000003">Charlie Empty</option>
+      </datalist>
+      <button>Load balance and history</button>
+      <button id="demo-alice" type="button">Use demo Alice</button>
+    </form>
+    <p>Balance: <strong id="balance">—</strong></p>
+    <p>Demo accounts are available after running the seed script.</p>
+  </section>
+
+  <section>
+    <h2>Add transaction</h2>
+    <p>Uses the account ID above.</p>
+    <form id="add-transaction">
+      <label>Type
+        <select name="type"><option value="credit">Credit</option><option value="debit">Debit</option></select>
+      </label>
+      <label>Amount <input name="amount" type="number" min="0.01" step="0.01" required></label>
+      <label>Reference ID <input name="reference_id" required maxlength="200"></label>
+      <label>Description <input name="description" maxlength="2000"></label>
+      <button>Add transaction</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Transaction history</h2>
+    <form id="history-filter">
+      <label>Type
+        <select id="history-type" name="type">
+          <option value="">All</option><option value="credit">Credit</option><option value="debit">Debit</option>
+        </select>
+      </label>
+      <label>Page size <input id="page-size" name="limit" type="number" min="1" max="100" value="10" required></label>
+      <button>Refresh history</button>
+    </form>
+    <p id="page-info">Load an account to see its history.</p>
+    <div class="table-wrap">
+      <table>
+        <thead><tr><th>Created</th><th>Type</th><th>Amount</th><th>Reference</th><th>Description</th></tr></thead>
+        <tbody id="history-body"><tr><td colspan="5">No account loaded.</td></tr></tbody>
+      </table>
+    </div>
+    <button id="previous" type="button" disabled>Previous</button>
+    <button id="next" type="button" disabled>Next</button>
+  </section>
+
+  <section>
+    <h2>Transfer money</h2>
+    <p>The account ID above is the source account.</p>
+    <form id="transfer">
+      <label>Destination account ID
+        <input name="destination_account_id" required list="demo-accounts" placeholder="Destination UUID">
+      </label>
+      <label>Amount <input name="amount" type="number" min="0.01" step="0.01" required></label>
+      <label>Reference ID <input name="reference_id" required maxlength="200"></label>
+      <label>Description <input name="description" maxlength="2000"></label>
+      <button>Transfer</button>
+    </form>
+  </section>
+
+  <section>
+    <h2>Last API response</h2>
+    <pre id="response">No requests yet.</pre>
+  </section>
+
+  <script>
+    const $ = (id) => document.getElementById(id);
+    let currentPage = 1;
+    let loadedAccount = '';
+    let busy = false;
+    let pagination = null;
+
+    function accountId() {
+      const value = $('account-id').value.trim();
+      if (!value) throw new Error('Enter an account ID first.');
+      return value;
+    }
+
+    async function request(path, body, showResponse = true) {
+      const response = await fetch(path, body === undefined ? {} : {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      const data = await response.json();
+      if (showResponse || !response.ok) $('response').textContent = JSON.stringify(data, null, 2);
+      if (!response.ok) {
+        const error = data.error;
+        const details = Array.isArray(error?.details)
+          ? error.details.map((item) => `${item.location.join('.')}: ${item.message}`).join('\n')
+          : '';
+        throw new Error(`${response.status}: ${error?.message || 'Request failed'}${details ? '\n' + details : ''}`);
+      }
+      return data;
+    }
+
+    function clearAccountView() {
+      $('balance').textContent = '—';
+      $('page-info').textContent = 'Load an account to see its history.';
+      $('history-body').replaceChildren();
+      $('previous').disabled = true;
+      $('next').disabled = true;
+      loadedAccount = '';
+      pagination = null;
+      currentPage = 1;
+    }
+
+    async function history(page = 1, showResponse = true) {
+      const id = accountId();
+      const limit = $('page-size').value;
+      const query = new URLSearchParams({ page: String(page), limit });
+      if ($('history-type').value) query.set('type', $('history-type').value);
+      const data = await request(`/accounts/${encodeURIComponent(id)}/transactions?${query}`, undefined, showResponse);
+      currentPage = data.pagination.page;
+      loadedAccount = id;
+      $('history-body').replaceChildren();
+      for (const entry of data.items) {
+        const row = document.createElement('tr');
+        for (const value of [new Date(entry.created_at).toLocaleString(), entry.type,
+                             entry.amount, entry.reference_id, entry.description]) {
+          const cell = document.createElement('td');
+          cell.textContent = value;
+          row.append(cell);
+        }
+        $('history-body').append(row);
+      }
+      if (!data.items.length) {
+        const row = document.createElement('tr');
+        const cell = document.createElement('td');
+        cell.colSpan = 5;
+        cell.textContent = 'No transactions on this page.';
+        row.append(cell);
+        $('history-body').append(row);
+      }
+      const p = data.pagination;
+      pagination = p;
+      $('page-info').textContent = `Page ${p.page} · ${p.total_pages} total pages · ${p.total_records} transactions`;
+      $('previous').disabled = p.page <= 1;
+      $('next').disabled = p.page >= p.total_pages;
+    }
+
+    async function loadAccount(showResponse = true) {
+      const id = accountId();
+      if (id !== loadedAccount) clearAccountView();
+      const data = await request(`/accounts/${encodeURIComponent(id)}/balance`, undefined, showResponse);
+      $('balance').textContent = data.balance;
+      await history(1, showResponse);
+    }
+
+    async function run(action, success) {
+      if (busy) return;
+      busy = true;
+      const controls = [...document.querySelectorAll('button, input, select')];
+      const previousStates = controls.map((control) => control.disabled);
+      controls.forEach((control) => { control.disabled = true; });
+      $('status').textContent = 'Loading…';
+      try {
+        await action();
+        $('status').textContent = success;
+      } catch (error) {
+        $('status').textContent = error.message;
+      } finally {
+        controls.forEach((control, i) => {
+          control.disabled = previousStates[i];
+        });
+        $('previous').disabled = !pagination || pagination.page <= 1;
+        $('next').disabled = !pagination || pagination.page >= pagination.total_pages;
+        busy = false;
+      }
+    }
+
+    function onSubmit(id, action, success) {
+      $(id).addEventListener('submit', (event) => {
+        event.preventDefault();
+        // Read form values before controls are disabled during the request.
+        const values = Object.fromEntries(new FormData(event.currentTarget));
+        run(() => action(values), success);
+      });
+    }
+
+    async function refreshAfterWrite(message) {
+      // The write already succeeded. A read failure must not look like a failed write.
+      try {
+        await loadAccount(false);
+      } catch (error) {
+        clearAccountView();
+        throw new Error(`${message} Refresh failed: ${error.message}`);
+      }
+    }
+
+    onSubmit('create-account', async (values) => {
+      const data = await request('/accounts', values);
+      $('account-id').value = data.id;
+      await refreshAfterWrite(`Account created: ${data.id}.`);
+    }, 'Account created and selected.');
+
+    onSubmit('load-account', () => loadAccount(), 'Account loaded.');
+
+    onSubmit('add-transaction', async (values) => {
+      await request(`/accounts/${encodeURIComponent(accountId())}/transactions`, values);
+      $('add-transaction').reset();
+      await refreshAfterWrite('Transaction created.');
+    }, 'Transaction created.');
+
+    onSubmit('history-filter', () => history(1), 'History loaded.');
+
+    onSubmit('transfer', async (values) => {
+      await request('/transfers', { source_account_id: accountId(), ...values });
+      $('transfer').reset();
+      await refreshAfterWrite('Transfer completed.');
+    }, 'Transfer completed.');
+
+    $('demo-alice').addEventListener('click', () => run(async () => {
+      $('account-id').value = '00000000-0000-4000-8000-000000000001';
+      await loadAccount();
+    }, 'Demo Alice loaded.'));
+    $('previous').addEventListener('click', () => run(() => history(currentPage - 1), 'History loaded.'));
+    $('next').addEventListener('click', () => run(() => history(currentPage + 1), 'History loaded.'));
+    $('account-id').addEventListener('input', clearAccountView);
+  </script>
+</body>
+</html>
